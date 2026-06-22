@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Auto-merge release PR
+        id: merge
+        if: ${{ steps.release.outputs.release_created != 'true' && steps.release.outputs.prs_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          PR=""
+          if [ -n "$PR_JSON" ]; then
+            PR=$(echo "$PR_JSON" | jq -r '.number // empty')
+          fi
+          if [ -z "$PR" ]; then
+            for _ in 1 2 3 4 5; do
+              PR=$(gh pr list --repo "${{ github.repository }}" --label "autorelease: pending" --base main --state open --json number --jq '.[0].number // empty')
+              [ -n "$PR" ] && break
+              sleep 3
+            done
+          fi
+          if [ -z "$PR" ]; then
+            echo "No open release PR to merge"
+            exit 1
+          fi
+          gh pr merge "$PR" --repo "${{ github.repository }}" --merge
+
+      - uses: actions/checkout@v5
+        if: ${{ steps.merge.outcome == 'success' }}
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - id: publish
+        if: ${{ steps.merge.outcome == 'success' }}
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - uses: docker/setup-qemu-action@v3
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.publish.outputs.release_created == 'true' }}
+
+      - uses: docker/setup-buildx-action@v3
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.publish.outputs.release_created == 'true' }}
+
+      - name: Resolve release version
+        id: version
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.publish.outputs.release_created == 'true' }}
+        run: |
+          if [ "${{ steps.publish.outputs.release_created }}" = "true" ]; then
+            echo "version=${{ steps.publish.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "major=${{ steps.publish.outputs.major }}" >> "$GITHUB_OUTPUT"
+            echo "minor=${{ steps.publish.outputs.minor }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ steps.release.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "major=${{ steps.release.outputs.major }}" >> "$GITHUB_OUTPUT"
+            echo "minor=${{ steps.release.outputs.minor }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@v3
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.publish.outputs.release_created == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.publish.outputs.release_created == 'true' }}
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.major }}.${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        if: ${{ steps.release.outputs.release_created == 'true' || steps.publish.outputs.release_created == 'true' }}
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
