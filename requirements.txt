@@ -1,2 +1,2 @@
 prometheus_client>=0.20.0
-requests>=2.31.0
+truenas_api_client @ git+https://github.com/truenas/api_client.git@TS-25.10.3

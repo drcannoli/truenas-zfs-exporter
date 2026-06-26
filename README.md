@@ -4,9 +4,11 @@ Written with the assistance of [Claude Code].
 
 A small Prometheus exporter that exposes ZFS pool health, capacity, fragmentation, scrub state/age, and per-vdev read/write/checksum errors from a TrueNAS system.
 
-It queries the TrueNAS REST API (`GET /api/v2.0/pool`) with an API key, so it runs as an ordinary container with no `/dev/zfs`, no privileged access, and no host scripts. This is the tier that node-exporter's ZFS collector and property-based exporters don't provide (scrub plus per-vdev errors).
+It queries the TrueNAS JSON-RPC 2.0 websocket API (`pool.query` over `wss://<host>/api/current`) with an API key, so it runs as an ordinary container with no `/dev/zfs`, no privileged access, and no host scripts. This is the tier that node-exporter's ZFS collector and property-based exporters don't provide (scrub plus per-vdev errors).
 
-## Metrics
+The pinned client (`@TS-25.10.3`) uses plaintext API-key auth. TrueNAS 26 switches API keys to SCRAM-SHA-512 (and removes the legacy REST API entirely); when upgrading to 26, bump the client tag in `requirements.txt` and adjust the `auth.login_with_api_key` call.
+2-7rsbzAoBCgHbYK1xqKoXIulzxy1gyHBewoapPVcK5OXuAU0QNz78dazg6fsPibMF
+## Metrics2-7rsbzAoBCgHbYK1xqKoXIulzxy1gyHBewoapPVcK5OXuAU0QNz78dazg6fsPibMF
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|

@@ -1,4 +1,4 @@
-"""Prometheus exporter for TrueNAS ZFS pool health via the REST API."""
+"""Prometheus exporter for TrueNAS ZFS pool health via the JSON-RPC websocket API."""
 from __future__ import annotations
 
 import logging
@@ -7,11 +7,10 @@ import signal
 import time
 from datetime import datetime
 from typing import Any, Iterable
-from urllib.parse import urljoin
 
-import requests
 from prometheus_client import REGISTRY, start_http_server
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
+from truenas_api_client import Client
 
 LOG = logging.getLogger("truenas_zfs_exporter")
 
@@ -20,11 +19,21 @@ POOL_STATUSES = ("ONLINE", "DEGRADED", "FAULTED", "OFFLINE", "UNAVAIL", "REMOVED
 SCAN_STATES = ("FINISHED", "SCANNING", "CANCELED", "NONE")
 TOPOLOGY_CATEGORIES = ("data", "log", "cache", "spare", "special", "dedup")
 
-TRUENAS_API_URL = os.environ.get("TRUENAS_API_URL", "https://127.0.0.1").rstrip("/")
+TRUENAS_API_URL = os.environ.get("TRUENAS_API_URL", "wss://127.0.0.1/api/current")
 TRUENAS_API_KEY = os.environ.get("TRUENAS_API_KEY", "")
 VERIFY_SSL = os.environ.get("TRUENAS_VERIFY_SSL", "true").lower() in ("1", "true", "yes")
 LISTEN_PORT = int(os.environ.get("EXPORTER_PORT", "9134"))
-TIMEOUT = float(os.environ.get("TRUENAS_TIMEOUT", "30"))
+
+
+def _ws_uri(value: str) -> str:
+    """Normalise a host or http(s) URL into a wss://<host>/api/current endpoint."""
+    v = value.strip()
+    if v.startswith(("ws://", "wss://")):
+        return v
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.strip("/")
+    return f"wss://{v}/api/current"
 
 
 def _to_float(value: Any) -> float | None:
@@ -76,14 +85,11 @@ def _iter_vdevs(node: Any, parent: str = "") -> Iterable[tuple[str, dict]]:
 
 class TrueNASZFSCollector:
     def _fetch_pools(self) -> list[dict]:
-        url = urljoin(TRUENAS_API_URL + "/", "api/v2.0/pool")
-        headers = {"Authorization": f"Bearer {TRUENAS_API_KEY}"}
-        resp = requests.get(url, headers=headers, timeout=TIMEOUT, verify=VERIFY_SSL)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        return data if isinstance(data, list) else []
+        uri = _ws_uri(TRUENAS_API_URL)
+        with Client(uri=uri, verify_ssl=VERIFY_SSL) as client:
+            if not client.call("auth.login_with_api_key", TRUENAS_API_KEY):
+                raise RuntimeError("TrueNAS API key authentication failed")
+            return client.call("pool.query")
 
     def collect(self):
         up = GaugeMetricFamily(f"{NAMESPACE}_up", "1 if the last TrueNAS API scrape succeeded, else 0")
@@ -91,7 +97,7 @@ class TrueNASZFSCollector:
         started = time.monotonic()
 
         if not TRUENAS_API_KEY:
-            LOG.error("TRUENAS_API_KEY is not set")
+            LOG.error("TRUENAS_API_KEY is not set; cannot query the API")
             up.add_metric([], 0.0)
             duration.add_metric([], time.monotonic() - started)
             yield up
@@ -188,7 +194,7 @@ def main() -> None:
     )
     REGISTRY.register(TrueNASZFSCollector())
     start_http_server(LISTEN_PORT)
-    LOG.info("listening on :%s (target=%s)", LISTEN_PORT, TRUENAS_API_URL)
+    LOG.info("listening on :%s (target=%s)", LISTEN_PORT, _ws_uri(TRUENAS_API_URL))
     signal.pause()
 
 
